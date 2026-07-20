@@ -1,7 +1,7 @@
 ---
-title: "OTI 16S analysis for: Scale-dependent structuring of sediment microbial communities on coral reefs"
+title: "OTI 16S analysis for: Scale-dependent structuring of sediment bacterial communities on coral reefs"
 author: "S. Gardner"
-date: "19 June 2026"
+date: "21 July 2026"
 output: html_document
 ---
 
@@ -821,17 +821,17 @@ alphpatch <- plot_richness(ps.patch, x = "Sample_location", measures = c("Shanno
   theme(text = element_text(size = 11),   axis.text.y = element_text(colour = "black", size = 11),axis.title.y = element_text(colour = "black", size = 11),  legend.title = element_text(size = 11),  legend.text = element_text(size = 11),  axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, colour = "black", size = 11)) + ylab("Alpha diversity") +  xlab("Sample location")
 ```
 
-#### Chao1
+#### Observed number of ASVs
 ```{r}
 library(car)
 library(rstatix)
 
-results.chao = estimate_richness(ps.patch.pruned, measures = 'Chao1')
-head(results.chao)
+results.obs = estimate_richness(ps.patch.pruned, measures = 'Observed')
+head(results.obs)
 
-results.chao <- results.chao %>%
+results.obs <- results.obs %>%
   tibble::rownames_to_column(var = "SampleID")
-   results.chao$SampleID <- str_replace(results.chao$SampleID, "A", "XA")
+   results.obs$SampleID <- str_replace(results.obs$SampleID, "A", "XA")
 
 meta <- data.frame(SampleID = sample_data(ps.patch.pruned)$SampleID, 
                    SiteName = sample_data(ps.patch.pruned)$SiteName,
@@ -842,24 +842,24 @@ meta$SampleID <- str_replace(meta$SampleID, "-E", ".E")
 meta$SampleID <- str_replace(meta$SampleID, "-I", ".I")
 meta$SampleID <- str_replace(meta$SampleID, "-O", ".O")
 
-results.chao <- left_join(results.chao, meta)
+results.obs <- left_join(results.obs, meta)
 
-Chao.summary <- results.chao %>%  group_by(SiteName) %>% 
-                    get_summary_stats(Chao1, type = "common")
+Obs.summary <- results.obs %>%  group_by(SiteName) %>% 
+                    get_summary_stats(Observed, type = "common")
 
-results.chao.aov <- aov(Chao1 ~ SiteName * SiteName/Sample_location, data = results.chao) # two-way anova with species Sample_location nested in SiteName
+results.obs.aov <- aov(Observed ~ SiteName * SiteName/Sample_location, data = results.obs) # two-way anova with species Sample_location nested in SiteName
 
-summary(results.chao.aov)
+summary(results.obs.aov)
 
-TukeyHSD(results.chao.aov)
+TukeyHSD(results.obs.aov)
 
-leveneTest(Chao1 ~ SiteName * SiteName/Sample_location, data = results.chao) # Check homogeneity of variances using Levenes
+leveneTest(Observed ~ SiteName * SiteName/Sample_location, data = results.obs) # Check homogeneity of variances using Levenes
 
 # Check normality
-plot(results.chao.aov, 1)
-plot(results.chao.aov, 2)
-aov_residuals <- residuals(object = results.chao.aov)
-shapiro.test(x = aov_residuals) # p-value = 0.9353 assumption of normality IS satisfied under shapiros
+plot(results.obs.aov, 1)
+plot(results.obs.aov, 2)
+aov_residuals <- residuals(object = results.obs.aov)
+shapiro.test(x = aov_residuals) # p-value = 0.82 assumption of normality IS satisfied under shapiros
 ```
 
 #### Shannon
@@ -1396,32 +1396,32 @@ reads_per_sample
 mean(sample_sums(ps)) 
 summary(sample_sums(ps))
 
-r <- rarefy_even_depth(ps, sample.size = 21481, verbose = FALSE, replace = TRUE) # rarify to 21481 1st quartile
+r <- rarefy_even_depth(ps, sample.size = 22020, verbose = FALSE, replace = TRUE) # rarify to 22020 1st quartile
 
 # prune OTUs that are not present in any of the samples, using rarefied data
 ps.pruned <- prune_taxa(taxa_sums(r) > 0, r)
 
 # Plot
-alpha <- plot_richness(ps.pruned,  x = "Sample_type", measures = c("Shannon", "Chao1", "Observed")) +
+alpha <- plot_richness(ps.pruned,  x = "Sample_type", measures = c("Shannon", "Observed")) +
   geom_boxplot(aes(fill = Sample_type), outlier.size = 0.2) +
   scale_fill_manual(values = c("Water" = "cornflowerblue",  "Sediment" = "orange")) +
   #geom_jitter(width = 0.2, size = 1, color = "black") +   # black points
   theme_bw() +  theme(legend.position = "right", aspect.ratio = 1.5,  text = element_text(size = 11),axis.text.y = element_text(colour = "black", size = 11),       axis.title.y = element_text(colour = "black", size = 11), legend.title = element_text(size = 11), legend.text = element_text(size = 11),panel.grid.minor = element_line(size = 0.5), panel.grid.major = element_line(size = 0.5), axis.text.x = element_blank(),  axis.title.x = element_blank()) + ylab("Alpha diversity") + xlab("Sample type")
 ```
 
-### Chao1
+### Observed ASVs
 ```{r}
 library(car)
 library(rstatix)
 
-results.chao = estimate_richness(ps.pruned, measures = 'Chao1')
+results.obs = estimate_richness(ps.pruned, measures = 'Observed')
 
-results.chao <- results.chao %>%
+results.obs <- results.obs %>%
   tibble::rownames_to_column(var = "SampleID")
-  results.chao$SampleID <- str_replace(results.chao$SampleID, "Alt", "XAlt")
-  results.chao$SampleID <- str_replace(results.chao$SampleID, "Apr", "XApr")
-  results.chao$SampleID <- str_replace(results.chao$SampleID, "Int", "XInt")
-  results.chao$SampleID <- str_replace(results.chao$SampleID, "OR1", "XOR1")
+  results.obs$SampleID <- str_replace(results.obs$SampleID, "Alt", "XAlt")
+  results.obs$SampleID <- str_replace(results.obs$SampleID, "Apr", "XApr")
+  results.obs$SampleID <- str_replace(results.obs$SampleID, "Int", "XInt")
+  results.obs$SampleID <- str_replace(results.obs$SampleID, "OR1", "XOR1")
 
 meta <- data.frame(SampleID = sample_data(ps.pruned)$SampleID,  Sample_type = sample_data(ps.pruned)$Sample_type)
   meta$SampleID <- str_replace(meta$SampleID, "^", "X")
@@ -1431,24 +1431,24 @@ meta <- data.frame(SampleID = sample_data(ps.pruned)$SampleID,  Sample_type = sa
   meta$SampleID <- str_replace(meta$SampleID, "-O", ".O")
   meta$SampleID <- str_replace(meta$SampleID, "-W", ".W")
 
-results.chao <- left_join(results.chao, meta)
+results.obs <- left_join(results.obs, meta)
 
-Chao.summary <- results.chao %>%
+Obs.summary <- results.obs %>%
                     group_by(Sample_type) %>% 
-                    get_summary_stats(Chao1, type = "common")
+                    get_summary_stats(Observed, type = "common")
 
-res.chao.aov <- aov(Chao1 ~ Sample_type, data = results.chao) 
+res.obs.aov <- aov(Observed ~ Sample_type, data = results.obs) 
 
-summary(res.chao.aov)
+summary(res.obs.aov)
 
-TukeyHSD(res.chao.aov)
+TukeyHSD(res.obs.aov)
 
-leveneTest(Chao1 ~ Sample_type, data = results.chao) 
+leveneTest(Observed ~ Sample_type, data = results.obs) 
 
 # Check normality
-plot(res.chao.aov, 1)
-plot(res.chao.aov, 2) 
-aov_residuals <- residuals(object = res.chao.aov) 
+plot(res.obs.aov, 1)
+plot(res.obs.aov, 2) 
+aov_residuals <- residuals(object = res.obs.aov) 
 shapiro.test(x = aov_residuals)
 ```
 
@@ -1773,7 +1773,7 @@ summary_long$variable <- factor(
 
 SiteNames <- sort(unique(summary_long$SiteName))
 
-site_order <- c("Alt1", "Alt2", "Alt3", "Alt4", "Int1", "Int2", "OTI01", "OTI03", "OTI05", "OTI06", "OTI07", "OTI08", "OTI10", "OTI12", "OTI15", "OTI16", "OTI18", "OTI19", "SA1", "SA2", "SA3")
+site_order <- c("Alt1", "Alt2", "Alt3", "Alt4", "Int1", "Int2", "OTI01", "OTI03", "OTI05", "OTI06", "OTI07", "OTI08", "OTI10", "OTI12", "OTI15", "OTI16", "SA1", "SA2", "SA3")
 
 facet_labels <- c(
   Chla = "Chlorophyll a (mg/mL)",
