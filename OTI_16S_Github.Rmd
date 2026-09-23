@@ -1,7 +1,7 @@
 ---
 title: "OTI 16S analysis for: Scale-dependent structuring of sediment bacterial communities on coral reefs"
 author: "S. Gardner"
-date: "21 July 2026"
+date: "23 September 2026"
 output: html_document
 ---
 
@@ -45,7 +45,7 @@ samptab <- sample_data(samptab)
 
 # 1. Drivers of sediment microbial communities at the lagoon-scale
 ## Test for spatial autocorrelation
-package: adespatial - function dbmem
+
 ```{r}
 library(ade4)
 library(spdep)
@@ -479,7 +479,594 @@ R2adj
 summary(dbrda_ll)
 ```
 
-# 2. Microbial community structure across reef microhabitats
+# 2.  Sediment characteristics in microhabitats
+## Environmental variables 
+```{r}
+# convert to data.frame
+samptab_df <- data.frame(samptab)
+
+summary_table <- samptab_df %>%
+  dplyr::filter(Replicate == 1, !Sample_location %in% c("Negative", "Blank", "Water"), !Sample_location %in% c("Edge", "Outer")) %>%
+  dplyr::select(SiteName, Reef_area, Lat, Long, Dcrest, Disland, Temp, mmHg, DO, pH, FNU, MaxDepth.m)
+
+range_summary <- samptab_df %>%
+  summarise(
+    Temperature_range = paste0(round(min(Temp, na.rm=TRUE), 2), " to ", round(max(Temp, na.rm=TRUE), 2)),
+    DissolvedOxygen_range = paste0(round(min(DO, na.rm=TRUE), 2), " to ", round(max(DO, na.rm=TRUE), 2)),
+    pH_range = paste0(round(min(pH, na.rm=TRUE), 2), " to ", round(max(pH, na.rm=TRUE), 2)),
+    Turbidity_range = paste0(round(min(FNU, na.rm=TRUE), 2), " to ", round(max(FNU, na.rm=TRUE), 2)),
+    Maxdepth_range = paste0(round(min(MaxDepth.m, na.rm=TRUE), 2), " to ", round(max(MaxDepth.m, na.rm=TRUE), 2)),)
+```
+
+### Stats
+```{r}
+filtered_df <- samptab_df %>%
+  filter(Experiment == "Patch", Replicate == "1", Sample_type != "Water") %>%
+  mutate(Sample_location = factor(Sample_location, levels = c("Inner", "Edge", "Outer")), SiteName = droplevels(factor(SiteName)))
+
+variables <- c("TP.mg.kg", "TN.mg.kg", "TOCpercent")
+
+# Model loop
+results_list <- list()
+anova_pvalues <- c()
+
+for (var in variables) {
+
+  dat <- filtered_df %>%
+    select(SiteName, Sample_location, all_of(var)) %>%
+    filter(!is.na(.data[[var]]))
+
+  formula <- as.formula(
+    paste(var, "~ Sample_location")
+  )
+
+  # Initial model
+  model <- lme(
+    fixed = formula,
+    random = ~1 | SiteName,
+    data = dat,
+    method = "REML"
+  )
+
+  # Residual diagnostics
+  res <- residuals(model, type = "normalized")
+  shapiro_p <- shapiro.test(res)$p.value
+
+  # Log transformation if required
+  transformed <- FALSE
+
+  if (shapiro_p < 0.05) {
+
+    dat[[var]] <- log(dat[[var]] + 1)
+
+    model <- lme(
+      fixed = formula,
+      random = ~1 | SiteName,
+      data = dat,
+      method = "REML"
+    )
+
+    res <- residuals(model, type = "normalized")
+    shapiro_p <- shapiro.test(res)$p.value
+
+    transformed <- TRUE
+  }
+
+  # ANOVA
+  anova_table <- anova(model)
+
+  microhabitat_row <- which(
+    rownames(anova_table) == "Sample_location"
+  )
+
+  F_value <- anova_table$`F-value`[microhabitat_row]
+  df1 <- anova_table$numDF[microhabitat_row]
+  df2 <- anova_table$denDF[microhabitat_row]
+  p_value <- anova_table$`p-value`[microhabitat_row]
+
+  # Pairwise comparisons
+  pairwise <- emmeans(
+    model,
+    pairwise ~ Sample_location,
+    adjust = "tukey"
+  )
+
+  results_list[[var]] <- list(
+    model = model,
+    anova = anova_table,
+    F_value = F_value,
+    df1 = df1,
+    df2 = df2,
+    p_value = p_value,
+    pairwise = pairwise,
+    shapiro_p = shapiro_p,
+    transformed = transformed
+  )
+}
+
+# FDR correction across the three nutrient tests
+raw_p <- sapply(results_list, function(x) x$p_value)
+
+fdr_p <- p.adjust(
+  raw_p,
+  method = "BH"
+)
+
+summary_table <- data.frame(
+  Variable = variables,
+  F_value = sapply(results_list, function(x) x$F_value),
+  df1 = sapply(results_list, function(x) x$df1),
+  df2 = sapply(results_list, function(x) x$df2),
+  p_value = raw_p,
+  FDR_p = fdr_p,
+  Shapiro_p = sapply(results_list, function(x) x$shapiro_p),
+  Log_transformed = sapply(
+    results_list,
+    function(x) x$transformed
+  )
+)
+
+summary_table
+
+results_list$GRAVELpercent$pairwise
+results_list$SANDpercent$pairwise
+results_list$MUDpercent$pairwise
+
+# Combine ANOVA results with summary stats
+summary_table_clean <- summary_table %>%
+  mutate(F_value = as.numeric(F_value), df1 = as.numeric(df1), df2 = as.numeric(df2), p_value = as.numeric(p_value),
+    Log_transformed = as.logical(Log_transformed)) %>%  select(Variable, F_value, df1, df2, p_value, Log_transformed)
+
+# Join with summary_long
+summary_plot_df <- summary_long %>%
+  left_join(summary_table_clean, by = "Variable") %>%
+  mutate(anova_label = paste0("F(", df1, ",", round(df2,1), ") = ", round(F_value,2), ifelse(p_value < 0.001, ", p < 0.001", paste0(", p = ", round(p_value,3))), ifelse(Log_transformed, " (log-transformed)", "")))
+
+# Ensure anova_label is character
+summary_plot_df <- summary_plot_df %>% mutate(anova_label = as.character(anova_label))
+
+# Create label_df with one label per variable
+label_df <- summary_plot_df %>%
+  group_by(Variable) %>%
+  summarise(y_pos = max(mean + se, na.rm = TRUE), anova_label = anova_label[1], .groups = "drop") %>%
+  mutate(x_pos = 2)  # middle position (assuming 1=Inner, 2=Edge, 3=Outer)
+
+library(dplyr)
+library(emmeans)
+library(multcompView)
+
+# Create a dataframe with letters
+letter_df <- lapply(names(results_list), function(var) {
+  pw <- results_list[[var]]$pairwise$contrasts  # emmeans pairwise results
+  # Convert to compact letter display
+  cld_res <- multcomp::cld(results_list[[var]]$pairwise$emmeans,
+                           Letters = letters,
+                           adjust = "tukey")
+  # Clean up output
+  cld_res <- as.data.frame(cld_res)
+  cld_res <- cld_res %>%
+    select(Sample_location, .group) %>%
+    mutate(Variable = var)
+  return(cld_res)
+}) %>%
+  bind_rows()
+
+plot_df <- summary_long %>%
+  left_join(letter_df, by = c("Sample_location", "Variable"))
+
+# PLOT
+ggplot(plot_df, aes(x = Sample_location, y = mean)) +
+  geom_col(fill = "skyblue2") +  geom_errorbar(aes(ymin = mean - se, ymax = mean + se), width = 0.2) +
+  geom_text(aes(x = x_pos, y = y_pos, label = anova_label), data = label_df, inherit.aes = FALSE, size = 3, hjust = 0.5) +
+  geom_text(aes(y = mean + se, label = .group), size = 3, vjust = -0.2) +
+  facet_wrap(~ Variable, scales = "free_y", ncol = 4) +
+  labs(x = "Microhabitat", y = "Mean ± SE") +
+  theme_bw() +  theme(strip.text = element_text(face = "bold"), aspect.ratio = 1)
+
+## Grain size
+filtered_df <- samptab_df %>%
+  filter(
+    Experiment == "Patch",
+    Sample_type != "Water"
+  ) %>%
+  group_by(SiteName, Sample_location) %>%
+  summarise(
+    GRAVELpercent = mean(GRAVELpercent, na.rm = TRUE),
+    SANDpercent   = mean(SANDpercent, na.rm = TRUE),
+    MUDpercent    = mean(MUDpercent, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Sample_location = factor(
+      Sample_location,
+      levels = c("Inner", "Edge", "Outer")
+    ),
+    SiteName = droplevels(factor(SiteName))
+  )
+variables <- c("GRAVELpercent", "SANDpercent", "MUDpercent")
+
+# Model loop
+results_list <- list()
+anova_pvalues <- c()
+
+for (var in variables) {
+
+  cat("\n==============================\n")
+  cat("Variable:", var, "\n")
+  cat("==============================\n")
+
+  dat <- filtered_df %>%
+    select(
+      SiteName,
+      Sample_location,
+      all_of(var)
+    ) %>%
+    filter(!is.na(.data[[var]]))
+
+  formula <- as.formula(
+    paste(var, "~ Sample_location")
+  )
+
+  model <- lme(
+    fixed = formula,
+    random = ~1 | SiteName,
+    data = dat,
+    method = "REML"
+  )
+
+  res <- residuals(
+    model,
+    type = "normalized"
+  )
+  shapiro_p <- shapiro.test(res)$p.value
+  transformed <- FALSE
+  if (shapiro_p < 0.05) {
+
+    dat[[var]] <- log(dat[[var]] + 1)
+
+    model <- lme(
+      fixed = formula,
+      random = ~1 | SiteName,
+      data = dat,
+      method = "REML"
+    )
+
+    res <- residuals(
+      model,
+      type = "normalized"
+    )
+
+    shapiro_p <- shapiro.test(res)$p.value
+
+    transformed <- TRUE
+  }
+
+  anova_table <- anova(model)
+
+  microhabitat_row <- which(
+    rownames(anova_table) == "Sample_location"
+  )
+
+  F_value <- anova_table$`F-value`[
+    microhabitat_row
+  ]
+
+  df1 <- anova_table$numDF[
+    microhabitat_row
+  ]
+
+  df2 <- anova_table$denDF[
+    microhabitat_row
+  ]
+
+  p_value <- anova_table$`p-value`[
+    microhabitat_row
+  ]
+
+  pairwise <- emmeans(
+    model,
+    pairwise ~ Sample_location,
+    adjust = "tukey"
+  )
+
+  results_list[[var]] <- list(
+    model = model,
+    anova = anova_table,
+    F_value = F_value,
+    df1 = df1,
+    df2 = df2,
+    p_value = p_value,
+    pairwise = pairwise,
+    shapiro_p = shapiro_p,
+    transformed = transformed
+  )
+
+  anova_pvalues <- c(
+    anova_pvalues,
+    p_value
+  )
+}
+
+fdr_p <- p.adjust(
+  anova_pvalues,
+  method = "BH"
+)
+
+names(fdr_p) <- variables
+
+summary_table <- data.frame(
+  Variable = variables,
+
+  F_value = sapply(
+    results_list,
+    function(x) x$F_value
+  ),
+
+  df1 = sapply(
+    results_list,
+    function(x) x$df1
+  ),
+
+  df2 = sapply(
+    results_list,
+    function(x) x$df2
+  ),
+
+  p_value = anova_pvalues,
+
+  FDR_p = fdr_p,
+
+  Shapiro_p = sapply(
+    results_list,
+    function(x) x$shapiro_p
+  ),
+
+  Log_transformed = sapply(
+    results_list,
+    function(x) x$transformed
+  )
+)
+
+summary_table
+
+# Combine ANOVA results with summary stats
+summary_table_clean <- summary_table %>%
+  mutate(F_value = as.numeric(F_value), df1 = as.numeric(df1), df2 = as.numeric(df2), p_value = as.numeric(p_value),
+    Log_transformed = as.logical(Log_transformed)) %>%  select(Variable, F_value, df1, df2, p_value, Log_transformed)
+
+# Join with summary_long
+summary_plot_df <- summary_long %>%
+  left_join(summary_table_clean, by = "Variable") %>%
+  mutate(anova_label = paste0("F(", df1, ",", round(df2,1), ") = ", round(F_value,2), ifelse(p_value < 0.001, ", p < 0.001", paste0(", p = ", round(p_value,3))), ifelse(Log_transformed, " (log-transformed)", "")))
+
+# Ensure anova_label is character
+summary_plot_df <- summary_plot_df %>% mutate(anova_label = as.character(anova_label))
+
+# Create label_df with one label per variable
+label_df <- summary_plot_df %>%
+  group_by(Variable) %>%
+  summarise(y_pos = max(mean + se, na.rm = TRUE), anova_label = anova_label[1], .groups = "drop") %>%
+  mutate(x_pos = 2)  # middle position (assuming 1=Inner, 2=Edge, 3=Outer)
+
+library(dplyr)
+library(emmeans)
+library(multcompView)
+
+# Create a dataframe with letters
+letter_df <- lapply(names(results_list), function(var) {
+  pw <- results_list[[var]]$pairwise$contrasts  # emmeans pairwise results
+  # Convert to compact letter display
+  cld_res <- multcomp::cld(results_list[[var]]$pairwise$emmeans,
+                           Letters = letters,
+                           adjust = "tukey")
+  # Clean up output
+  cld_res <- as.data.frame(cld_res)
+  cld_res <- cld_res %>%
+    select(Sample_location, .group) %>%
+    mutate(Variable = var)
+  return(cld_res)
+}) %>%
+  bind_rows()
+
+plot_df <- summary_long %>%
+  left_join(letter_df, by = c("Sample_location", "Variable"))
+
+# PLOT
+ggplot(plot_df, aes(x = Sample_location, y = mean)) +
+  geom_col(fill = "skyblue2") +  geom_errorbar(aes(ymin = mean - se, ymax = mean + se), width = 0.2) +
+  geom_text(aes(x = x_pos, y = y_pos, label = anova_label), data = label_df, inherit.aes = FALSE, size = 3, hjust = 0.5) +
+  geom_text(aes(y = mean + se, label = .group), size = 3, vjust = -0.2) +
+  facet_wrap(~ Variable, scales = "free_y", ncol = 4) +
+  labs(x = "Microhabitat", y = "Mean ± SE") +
+  theme_bw() +  theme(strip.text = element_text(face = "bold"), aspect.ratio = 1)
+
+
+## Chlorophyll
+filtered_df <- samptab_df %>%
+  filter(Experiment == "Patch", Replicate == "1", Sample_type != "Water") %>%
+  mutate(Sample_location = factor(Sample_location, levels = c("Inner", "Edge", "Outer")), SiteName = droplevels(factor(SiteName)))
+
+variables <- c("Chla", "Pheo", "ChlPheo")
+
+table(filtered_df$SiteName, filtered_df$Sample_location)
+table(filtered_df$Sample_location)
+nrow(filtered_df)
+length(unique(filtered_df$SiteName))
+
+# Model loop: Fits model: Variable ~ Sample_location + (1|SiteName), Checks residual diagnostics, Tests normality, Provides ANOVA table, Gives pairwise contrasts, model_results <- list()
+results_list <- list()
+anova_pvalues <- c()
+
+for (var in variables) {
+
+  dat <- filtered_df %>%
+    select(SiteName, Sample_location, all_of(var)) %>%
+    filter(!is.na(.data[[var]]))
+
+  formula <- as.formula(
+    paste(var, "~ Sample_location")
+  )
+
+  # Initial model
+  model <- lme(
+    fixed = formula,
+    random = ~1 | SiteName,
+    data = dat,
+    method = "REML"
+  )
+
+  # Residual diagnostics
+  res <- residuals(model, type = "normalized")
+  shapiro_p <- shapiro.test(res)$p.value
+
+  # Log transformation if required
+  transformed <- FALSE
+
+  if (shapiro_p < 0.05) {
+
+    dat[[var]] <- log(dat[[var]] + 1)
+
+    model <- lme(
+      fixed = formula,
+      random = ~1 | SiteName,
+      data = dat,
+      method = "REML"
+    )
+
+    res <- residuals(model, type = "normalized")
+    shapiro_p <- shapiro.test(res)$p.value
+
+    transformed <- TRUE
+  }
+
+  # ANOVA
+  anova_table <- anova(model)
+
+  microhabitat_row <- which(
+    rownames(anova_table) == "Sample_location"
+  )
+
+  F_value <- anova_table$`F-value`[microhabitat_row]
+  df1 <- anova_table$numDF[microhabitat_row]
+  df2 <- anova_table$denDF[microhabitat_row]
+  p_value <- anova_table$`p-value`[microhabitat_row]
+
+  # Pairwise comparisons
+  pairwise <- emmeans(
+    model,
+    pairwise ~ Sample_location,
+    adjust = "tukey"
+  )
+
+  results_list[[var]] <- list(
+    model = model,
+    anova = anova_table,
+    F_value = F_value,
+    df1 = df1,
+    df2 = df2,
+    p_value = p_value,
+    pairwise = pairwise,
+    shapiro_p = shapiro_p,
+    transformed = transformed
+  )
+}
+
+raw_p <- sapply(results_list, function(x) x$p_value)
+
+fdr_p <- p.adjust(
+  raw_p,
+  method = "BH"
+)
+
+summary_table <- data.frame(
+  Variable = variables,
+  F_value = sapply(results_list, function(x) x$F_value),
+  df1 = sapply(results_list, function(x) x$df1),
+  df2 = sapply(results_list, function(x) x$df2),
+  p_value = raw_p,
+  FDR_p = fdr_p,
+  Shapiro_p = sapply(results_list, function(x) x$shapiro_p),
+  Log_transformed = sapply(
+    results_list,
+    function(x) x$transformed
+  )
+)
+
+summary_table
+
+results_list$Chla$pairwise
+results_list$Pheo$pairwise
+results_list$ChlPheo$pairwise
+
+## PLOT:
+summary_long <- filtered_df %>%
+  group_by(Sample_location) %>%
+  summarise(
+    Chla_mean = mean(Chla, na.rm = TRUE),   Chla_se = sd(Chla, na.rm = TRUE) / sqrt(sum(!is.na(Chla))),
+        Pheo_mean = mean(Pheo, na.rm = TRUE),   Pheo_se = sd(Pheo, na.rm = TRUE) / sqrt(sum(!is.na(Pheo))),
+        ChlPheo_mean = mean(ChlPheo, na.rm = TRUE),   ChlPheo_se = sd(ChlPheo, na.rm = TRUE) / sqrt(sum(!is.na(ChlPheo))),  .groups = "drop") %>%
+  tidyr::pivot_longer(
+    cols = c(
+      Chla_mean, Chla_se,
+      Pheo_mean, Pheo_se,
+      ChlPheo_mean, ChlPheo_se),  names_to = c("Variable", ".value"),  names_pattern = "(Chla|Pheo|ChlPheo)_(mean|se)")
+
+summary_long
+
+summary_table_clean <- summary_table %>%
+  mutate(
+    F_value = as.numeric(F_value),
+    df1 = as.numeric(df1),
+    df2 = as.numeric(df2),
+    p_value = as.numeric(p_value),
+    FDR_p = as.numeric(FDR_p),
+    Log_transformed = as.logical(Log_transformed)
+  ) %>%
+  select(Variable,F_value,  df1,  df2,  p_value,  FDR_p,  Log_transformed)
+
+summary_plot_df <- summary_long %>%
+  left_join(summary_table_clean, by = "Variable") %>%
+  mutate(anova_label = paste0("F(", df1, ",", round(df2, 1), ") = ",  round(F_value, 2),ifelse(p_value < 0.001, ", p < 0.001",paste0(", p = ", round(p_value, 3))),
+      ifelse(Log_transformed, " (log-transformed)", "")))
+
+letter_df <- lapply(names(results_list), function(var) {
+
+  emm <- results_list[[var]]$pairwise$emmeans
+  cld_res <- multcomp::cld(
+    emm,
+    Letters = letters,
+    adjust = "tukey")
+  cld_res <- as.data.frame(cld_res) %>%
+    select(Sample_location, .group) %>%
+    mutate(
+      Variable = var,
+      .group = trimws(.group))
+  return(cld_res)}) %>%
+  bind_rows()
+
+letter_df
+
+# USED
+plot_df <- summary_plot_df %>% left_join(letter_df,  by = c("Sample_location", "Variable"))
+
+# Position ANOVA labels above each panel
+label_df <- plot_df %>%
+  group_by(Variable) %>%
+  summarise(y_max = max(mean + se, na.rm = TRUE),  anova_label = dplyr::first(anova_label),  .groups = "drop") %>%
+  mutate(y_pos = y_max * 1.20,  x_pos = 2)
+
+# Plot
+ggplot(plot_df, aes(x = Sample_location,y = mean)) +
+  geom_col( fill = "skyblue2",  width = 0.7) +
+  geom_errorbar(aes(ymin = mean - se,   ymax = mean + se),width = 0.2) +
+  geom_text(aes(y = mean + se,label = .group),size = 3,  vjust = -0.3) +
+  geom_text(aes(x = x_pos,  y = y_pos,  label = anova_label), data = label_df,inherit.aes = FALSE,size = 3,   hjust = 0.5) +
+  facet_wrap(~ Variable,scales = "free_y",ncol = 3) +
+  labs(x = "Microhabitat",y = "Mean ± SE") + theme_bw() +theme(strip.text = element_text(face = "bold"),  aspect.ratio = 1)
+```
+
+
+# 3. Microbial community structure across reef microhabitats
 
 ## Beta diversity: Full dataset
 ```{r echo=TRUE, tidy=TRUE, tidy.opts=list(width.cutoff=60)}
@@ -802,7 +1389,6 @@ reads_per_sample
 
 mean(sample_sums(ps.patch)) 
 summary(sample_sums(ps.patch))
-
 
 smallest <- min(sample_sums(ps.patch))
 r <- rarefy_even_depth(ps.patch, sample.size = 19635, verbose = FALSE, replace = TRUE) # rarify to 19635 1st quartile
@@ -1176,184 +1762,252 @@ ggplot(plot_data, aes(x = log2FoldChange,  y = reorder_within(Order_Family_Genus
   ylab("Order_Family_Genus") +  xlab("Log2 Fold Change")
 ```
 
-# 3.  Sediment characteristics in microhabitats
-## Environmental variables 
+### FAPROTAX: MICROHABITATS
 ```{r}
-# convert to data.frame if phyloseq:
-samptab_df <- data.frame(samptab)
-
-summary_table <- samptab_df %>%
-  dplyr::filter(Experiment %in% c("Patch"), !Sample_type %in% c("Water")) %>% 
-  dplyr::select(Samplename, SiteName, Replicate, Sample_location, TP.mg.kg, TN.mg.kg, TOCpercent, NP, MeanGrainsize,	Sorting,	Skewness,	Kurtosis,	D50um,	D50f,	GRAVELpercent,	SANDpercent,	MUDpercent)
-
-range_summary <- samptab_df %>%
-  summarise(
-    Temperature_range = paste0(round(min(Temp, na.rm=TRUE), 2), " to ", round(max(Temp, na.rm=TRUE), 2)),
-    DissolvedOxygen_range = paste0(round(min(DO, na.rm=TRUE), 2), " to ", round(max(DO, na.rm=TRUE), 2)),
-    pH_range = paste0(round(min(pH, na.rm=TRUE), 2), " to ", round(max(pH, na.rm=TRUE), 2)),
-    Turbidity_range = paste0(round(min(FNU, na.rm=TRUE), 2), " to ", round(max(FNU, na.rm=TRUE), 2)),
-    Maxdepth_range = paste0(round(min(MaxDepth.m, na.rm=TRUE), 2), " to ", round(max(MaxDepth.m, na.rm=TRUE), 2)),)
-```
-
-### Stats
-```{r}
+library(phyloseq)
+library(microeco)
+library(file2meco)
 library(dplyr)
-library(nlme)
-library(emmeans)
-library(car)
-library(broom)
-library(purrr)
+library(pheatmap)
 
-filtered_df <- samptab_df %>%
-  filter(Experiment == "Patch", Sample_type != "Water") %>%
-  mutate(Sample_location = factor(Sample_location, levels = c("Inner", "Edge", "Outer")), SiteName = droplevels(factor(SiteName)))
+# Prevalence filtering
+otu <- as(otu_table(ps.patch), "matrix")
 
-variables <- c("TP.mg.kg", "TN.mg.kg", "TOCpercent", "MeanGrainsize", "D50um", "GRAVELpercent", "SANDpercent", "MUDpercent")
-
-# Model loop: Fits model: Variable ~ Sample_location + (1|SiteName), Checks residual diagnostics, Tests normality, Provides ANOVA table, Gives pairwise contrasts, model_results <- list()
-results_list <- list()
-anova_pvalues <- c()
-
-for (var in variables) {
-  
-  cat("\n==============================\n")
-  cat("Variable:", var, "\n")
-  cat("==============================\n")
-  
-  dat <- filtered_df %>%
-    select(SiteName, Sample_location, all_of(var)) %>%
-    filter(!is.na(.data[[var]]))
-  
-  formula_fixed <- as.formula(paste(var, "~ Sample_location"))
-  
-  model <- lme(
-    fixed = formula_fixed,
-    random = ~1 | SiteName,
-    data = dat,
-    method = "ML"
-  )
-  
-  # ASSUMPTION CHECKS
-  res <- residuals(model, type = "normalized")
-  
-  shapiro_p <- shapiro.test(res)$p.value
-  
-  levene_p <- car::leveneTest(
-    dat[[var]] ~ dat$Sample_location
-  )[1, "Pr(>F)"]
-  
-  transformed <- FALSE
-  
-  #  If assumptions violated → log transform 
-  if (shapiro_p < 0.05 | levene_p < 0.05) {
-    
-    cat("Assumptions violated → applying log transformation\n")
-    
-    dat[[var]] <- log(dat[[var]] + 1)
-    
-    model <- lme(
-      fixed = formula_fixed,
-      random = ~1 | SiteName,
-      data = dat,
-      method = "ML"
-    )
-    
-    res <- residuals(model, type = "normalized")
-    shapiro_p <- shapiro.test(res)$p.value
-    levene_p <- car::leveneTest(
-      dat[[var]] ~ dat$Sample_location
-    )[1, "Pr(>F)"]
-    
-    transformed <- TRUE
-  }
-  
-  # ANOVA
-  anova_table <- anova(model)
-  p_value <- anova_table$`p-value`[1]
-  anova_pvalues <- c(anova_pvalues, p_value)
-  
-  pairwise <- emmeans(model, pairwise ~ Sample_location,
-                      adjust = "tukey")
-  
-  print(anova_table)
-  print(pairwise)
-  
-  results_list[[var]] <- list(
-    model = model,
-    anova = anova_table,
-    pairwise = pairwise,
-    shapiro_p = shapiro_p,
-    levene_p = levene_p,
-    transformed = transformed
-  )
+if (!taxa_are_rows(ps.patch)) {
+  otu <- t(otu)
 }
 
-fdr_p <- p.adjust(anova_pvalues, method = "BH")
-names(fdr_p) <- variables
+prevalence <- rowSums(otu > 0)
+min_samples <- ceiling(0.20 * nsamples(ps.patch)) # 20% prevalence filtering
+keep_ASVs <- names(prevalence[prevalence >= min_samples])
 
-summary_table <- data.frame(
-  Variable = variables,
-  F_value = sapply(results_list,
-                   function(x) x$anova$`F-value`[1]),
-  df1 = sapply(results_list,
-               function(x) x$anova$numDF[1]),
-  df2 = sapply(results_list,
-               function(x) x$anova$denDF[1]),
-  p_value = anova_pvalues,
-  FDR_p = fdr_p,
-  Shapiro_p = sapply(results_list, function(x) x$shapiro_p),
-  Levene_p = sapply(results_list, function(x) x$levene_p),
-  Log_transformed = sapply(results_list, function(x) x$transformed))
+cat("Samples:", nsamples(ps.patch), "\n")
+cat("Original ASVs:", ntaxa(ps.patch), "\n")
+cat("Prevalence threshold:", min_samples, "samples\n")
+cat("ASVs retained:", length(keep_ASVs), "\n")
+
+ps_picrust <- prune_taxa(keep_ASVs, ps.patch)
+ps_picrust
+
+# Convert phyloseq to microeco
+meco_picrust <- phyloseq2meco(ps_picrust)
+
+# FAPROTAX
+func <- trans_func$new(meco_picrust)
+func$cal_func(prok_database = "FAPROTAX")
+
+# Available FAPROTAX groups
+func$func_group_list
+
+names(func)
+str(func, max.level = 2)
+names(func$res_func)
+head(func$res_func) # ASV × FAPROTAX function matrix
+
+# Abundance-weighted FAPROTAX abundance
+func$cal_func_FR(abundance_weighted = TRUE,  perc = TRUE)
+
+func_abund <- func$res_func_FR # sample × function matrix that has already aggregated those ASV assignments
+
+head(func_abund)
+dim(func_abund)
+
+# Ecologically relevant FAPROTAX functions
+target_functions <- c("photosynthetic_cyanobacteria",  "aerobic_anoxygenic_phototrophy",  "photoheterotrophy",   "aerobic_chemoheterotrophy", "anaerobic_chemoheterotrophy",  "fermentation",   "nitrogen_fixation","nitrate_reduction","sulfate_respiration","respiration_of_sulfur_compounds",  "hydrocarbon_degradation")
+
+# Only retain functions actually present in your FAPROTAX result
+target_functions <- intersect(target_functions,  colnames(func_abund))
+target_functions
+
+setdiff(c("photosynthetic_cyanobacteria",  "aerobic_anoxygenic_phototrophy",  "photoheterotrophy",  "aerobic_chemoheterotrophy",  "anaerobic_chemoheterotrophy",  "fermentation",   "nitrogen_fixation",  "nitrate_reduction",  "sulfate_respiration",  "respiration_of_sulfur_compounds",  "hydrocarbon_degradation"),  target_functions)
+
+# Functional abundance + sample metadata
+functional_data <- func_abund[, target_functions, drop = FALSE]
+metadata <- data.frame(sample_data(ps_picrust))
+
+# Check sample matching
+identical(rownames(functional_data),  rownames(metadata))
+
+functional_model <- cbind(metadata, functional_data)
+
+dim(functional_model)
+head(functional_model[, c("Sample_location", target_functions)])
+
+table(functional_model$Sample_type)
+
+function_labels <- c(photosynthetic_cyanobacteria =   "Photosynthetic cyanobacteria",  aerobic_anoxygenic_phototrophy =  "Aerobic anoxygenic phototrophy",  photoheterotrophy =  "Photoheterotrophy",aerobic_chemoheterotrophy =   "Aerobic chemoheterotrophy",  anaerobic_chemoheterotrophy =   "Anaerobic chemoheterotrophy",  fermentation =  "Fermentation",  nitrogen_fixation =  "Nitrogen fixation",
+  nitrate_reduction =    "Nitrate reduction", sulfate_respiration =   "Sulfate respiration",  respiration_of_sulfur_compounds =   "Sulfur-compound respiration",  hydrocarbon_degradation =   "Hydrocarbon degradation")
+
+# Only keep labels for functions actually present
+function_labels <- function_labels[names(function_labels) %in% target_functions]
+
+# Mean FAPROTAX abundance by Sample_type
+grouped_data <- functional_model %>%
+  group_by(Sample_location) %>%
+  summarise(across(all_of(target_functions),  ~ mean(.x, na.rm = TRUE)),.groups = "drop")
+
+grouped_data
+
+# Prepare grouped heatmap matrix
+heatmap_mean <- as.data.frame(grouped_data)
+
+rownames(heatmap_mean) <- heatmap_mean$Sample_location
+
+heatmap_mean$Sample_location <- NULL
+heatmap_mean <- t(as.matrix(heatmap_mean))
+
+colnames(heatmap_mean) <- c("Inner", "Edge",  "Outer")
+rownames(heatmap_mean) <- function_labels[rownames(heatmap_mean)]
+
+heatmap_mean <- as.matrix(grouped_data[, target_functions])
+rownames(heatmap_mean) <- grouped_data$Sample_location
+heatmap_mean <- t(heatmap_mean)
+rownames(heatmap_mean) <- function_labels[rownames(heatmap_mean)]
+heatmap_mean <- heatmap_mean[ , c("Inner", "Edge",  "Outer"), drop = FALSE]
+
+# Grouped mean heatmap
+pheatmap(heatmap_mean, cluster_rows = FALSE, cluster_cols = FALSE,  border_color = NA,  
+         #color = colorRampPalette(c("#FFF7EC", "#FDD49E", "#FC8D59", "#D7301F", "#7F0000"))(100),
+         color = colorRampPalette(c("#F7FBFF", "#DEEBF7", "#9ECAE1", "#4292C6", "#2171B5", "#084594"))(100),
+         #color = colorRampPalette(c("#D9EEF7", "#B7DCEB", "#8FC4D9", "#4292C6", "#2171B5", "#084594"))(100),
+         #color = colorRampPalette(c("#D6E6EF", "#B8D5E2", "#8FBCCD", "#4A91B5", "#216B8F", "#084594"))(100),
+         #color = colorRampPalette(c("#F7FCFD", "#CCECE6", "#7BC8C4", "#41AE76", "#238B45", "#005824"))(100),
+         #color = colorRampPalette(c("#F5FBFB", "#D5F0EE", "#9BD8D3", "#5AB4AC", "#238B8D", "#0868AC"))(100),
+         fontsize = 11,  fontsize_row = 11,  fontsize_col = 11,  angle_col = 0,  main = "Average predicted functional abundance (%)",  legend = TRUE,  legend_labels = NULL)
+
+#  Individual-sample heatmap
+annotation <- functional_model %>%  select(Sample_location, SiteNumber)
+
+rownames(annotation) <- rownames(functional_model)
+annotation$Sample_location <- factor(annotation$Sample_location,levels = c("Inner", "Edge",  "Outer"))
+
+sample_order <- annotation %>%
+  mutate(Sample = rownames(annotation)) %>%
+  arrange(Sample_location, SiteNumber) %>%
+  pull(Sample)
+
+heatmap_data <- functional_model[sample_order,  target_functions,  drop = FALSE]
+
+#  Z-score each functional group
+heatmap_z <- scale(heatmap_data)
+heatmap_z <- as.data.frame(heatmap_z)
+
+rownames(heatmap_z) <- rownames(heatmap_data)
+colnames(heatmap_z) <- function_labels[ colnames(heatmap_z)]
+annotation <- annotation[sample_order,  ,  drop = FALSE]
+identical(rownames(heatmap_z),  rownames(annotation))
+
+#  Individual-sample Z-score heatmap
+annotation_colors <- list(Sample_location = c("Inner" = "aquamarine4", "Edge" = "brown1", "Outer" = "goldenrod1"))
+
+pheatmap(t(heatmap_z),annotation_col = annotation,  annotation_colors = annotation_colors,  cluster_rows = FALSE,  cluster_cols = FALSE,  scale = "none",  border_color = NA,  fontsize = 9,  fontsize_col = 6,  angle_col = 90)
 ```
 
-### Plot
+## statistical comaprisons:
 ```{r}
-# Combine ANOVA results with summary stats
-summary_table_clean <- summary_table %>%
-  mutate(F_value = as.numeric(F_value), df1 = as.numeric(df1), df2 = as.numeric(df2), p_value = as.numeric(p_value),
-    Log_transformed = as.logical(Log_transformed)) %>%  select(Variable, F_value, df1, df2, p_value, Log_transformed)
-
-# Join with summary_long
-summary_plot_df <- summary_long %>%
-  left_join(summary_table_clean, by = "Variable") %>%
-  mutate(anova_label = paste0("F(", df1, ",", round(df2,1), ") = ", round(F_value,2), ifelse(p_value < 0.001, ", p < 0.001", paste0(", p = ", round(p_value,3))), ifelse(Log_transformed, " (log-transformed)", "")))
-
-# Ensure anova_label is character
-summary_plot_df <- summary_plot_df %>% mutate(anova_label = as.character(anova_label))
-
-# Create label_df with one label per variable
-label_df <- summary_plot_df %>%
-  group_by(Variable) %>%
-  summarise(y_pos = max(mean + se, na.rm = TRUE), anova_label = anova_label[1], .groups = "drop") %>%
-  mutate(x_pos = 2)  # middle position (assuming 1=Inner, 2=Edge, 3=Outer)
-
-library(dplyr)
-library(emmeans)
-library(multcompView)
-
-# Create a dataframe with letters
-letter_df <- lapply(names(results_list), function(var) {
-  pw <- results_list[[var]]$pairwise$contrasts  # emmeans pairwise results
-  cld_res <- multcomp::cld(results_list[[var]]$pairwise$emmeans,
-                           Letters = letters,
-                           adjust = "tukey")
-  cld_res <- as.data.frame(cld_res)
-  cld_res <- cld_res %>%
-    select(Sample_location, .group) %>%
-    mutate(Variable = var)
-  return(cld_res)}) %>%
+function_summary <- lapply(target_functions, function(fun) {
+  
+  dat <- functional_model %>%
+    select(Sample_location, all_of(fun)) %>%
+    filter(!is.na(.data[[fun]]))
+  
+  test <- kruskal.test(
+    dat[[fun]] ~ dat$Sample_location
+  )
+  
+  summary <- dat %>%
+    group_by(Sample_location) %>%
+    summarise(
+      median = median(.data[[fun]], na.rm = TRUE),
+      IQR = IQR(.data[[fun]], na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  data.frame(
+    Function = fun,
+    Inner_median = summary$median[summary$Sample_location == "Inner"],
+    Inner_IQR = summary$IQR[summary$Sample_location == "Inner"],
+    Edge_median = summary$median[summary$Sample_location == "Edge"],
+    Edge_IQR = summary$IQR[summary$Sample_location == "Edge"],
+    Outer_median = summary$median[summary$Sample_location == "Outer"],
+    Outer_IQR = summary$IQR[summary$Sample_location == "Outer"],
+    P = test$p.value
+  )
+}) %>%
   bind_rows()
 
-plot_df <- summary_long %>%  left_join(letter_df, by = c("Sample_location", "Variable"))
+function_summary$P_adj <- p.adjust(function_summary$P,method = "BH")
 
-ggplot(plot_df, aes(x = Sample_location, y = mean)) +
-  geom_col(fill = "skyblue2") +  geom_errorbar(aes(ymin = mean - se, ymax = mean + se), width = 0.2) +
-  geom_text(aes(x = x_pos, y = y_pos, label = anova_label), data = label_df, inherit.aes = FALSE, size = 3, hjust = 0.5) +
-  geom_text(aes(y = mean + se, label = .group), size = 3, vjust = -0.2) +
-  facet_wrap(~ Variable, scales = "free_y", ncol = 4) +
-  labs(x = "Microhabitat", y = "Mean ± SE") +
-  theme_bw() +  theme(strip.text = element_text(face = "bold"), aspect.ratio = 1)
+function_summary$Function_label <-
+  function_labels[function_summary$Function]
+
+function_summary %>%
+  select(Function,Inner_median, Edge_median, Outer_median,  P,  P_adj)
+
+function_summary <- function_summary %>% mutate(P = round(P, 5),  P_adj = round(P_adj, 5))
+function_summary
+
+# Pairwise Wilcoxon tests: raw p-values first
+pairwise_results <- lapply(target_functions, function(fun) {
+  
+  dat <- functional_model %>%
+    select(Sample_location, all_of(fun)) %>%
+    filter(!is.na(.data[[fun]]))
+  
+  pw <- pairwise.wilcox.test(
+    dat[[fun]],
+    dat$Sample_location,
+    p.adjust.method = "none",
+    exact = FALSE
+  )
+  
+   pmat <- pw$p.value
+  
+  results <- expand.grid(
+    Microhabitat_1 = rownames(pmat),
+    Microhabitat_2 = colnames(pmat),
+    stringsAsFactors = FALSE
+  )
+  
+  results$P <- as.vector(pmat)
+  
+  results %>%
+    filter(!is.na(P)) %>%
+    mutate(Function = fun)
+  
+}) %>%
+  bind_rows()
+
+# BH correction
+pairwise_results <- pairwise_results %>%  mutate(P_adj_BH = p.adjust(P, method = "BH"))
+pairwise_results <- pairwise_results %>%  mutate(P = round(P, 5),  P_adj_BH = round(P_adj_BH, 5))
 ```
+
+### Overall multivariate test
+```{r}
+library(vegan)
+
+functional_matrix <- functional_model[, target_functions]
+rownames(functional_matrix) <- rownames(functional_model)
+
+keep <- rowSums(functional_matrix, na.rm = TRUE) > 0
+
+functional_matrix_clean <- functional_matrix[keep, ]
+
+functional_model_clean <- functional_model[keep, ]
+
+table(functional_model_clean$Sample_type)
+
+identical(rownames(functional_matrix_clean),  rownames(functional_model_clean)) # TRUE
+
+functional_dist <- vegdist(functional_matrix_clean,  method = "bray")
+
+adonis_function <- adonis2(functional_dist ~ Sample_location,  data = functional_model_clean,  permutations = 999)
+
+bd_function <- betadisper(functional_dist,  functional_model_clean$Sample_location)
+permutest(bd_function, permutations = 999)
+```
+
 
 # 4. Bacterial diversity and community structure of sediment vs. seawater
 ## Beta diversity
@@ -1684,109 +2338,382 @@ ggplot(relabun_df, aes(x = Family, y = Mean_rel_abun, fill = Family)) +
   scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +  theme_bw(base_size = 11) +  theme(legend.position = "none",  axis.text = element_text(colour = "black"),  axis.title = element_text(colour = "black"),strip.text = element_text(size = 12)) +  labs(x = "Family",y = "Mean relative abundance (%)",  title = "Most prevalent microbial families by habitat",  subtitle = "Top 10 families selected independently for sediment and seawater")
 ```
 
-# 5. Physicochemical measurements
-## Environmental factors (temp, salinity etc per site)
+# Abundacnce-occupancy
 ```{r}
-samptab_df <- data.frame(samptab)
-
-# check your replicate column name; adjust if necessary
-summary_table <- samptab_df %>%
-  dplyr::filter(Replicate == 1, !Sample_location %in% c("Negative", "Blank", "Water"), !Sample_location %in% c("Edge", "Outer")) %>%
-  dplyr::select(SiteName, Reef_area, Lat, Long, Temp, DO, pH, MaxDepth.m)
-
-#write.csv(summary_table, "Environmental factors_summary.csv", row.names = FALSE)
-
-range_summary <- samptab_df %>%
-  summarise(
-    Temperature_range = paste0(round(min(Temp, na.rm=TRUE), 2), " to ", round(max(Temp, na.rm=TRUE), 2)),
-    DissolvedOxygen_range = paste0(round(min(DO, na.rm=TRUE), 2), " to ", round(max(DO, na.rm=TRUE), 2)),
-    pH_range = paste0(round(min(pH, na.rm=TRUE), 2), " to ", round(max(pH, na.rm=TRUE), 2)),
-    Maxdepth_range = paste0(round(min(MaxDepth.m, na.rm=TRUE), 2), " to ", round(max(MaxDepth.m, na.rm=TRUE), 2)),)
-```
-
-## Chlorophyll
-```{r}
-samptab <- read.csv("metadataOTI.csv", header = TRUE)
-rownames(samptab) <- samptab$SampleID
-samptab_df <- data.frame(samptab)
-
-samples_chl <- samptab[complete.cases(samptab[, c("Chla", "Pheo", "ChlPheo")]), ]
-
-summary_table <- samples_chl %>%
-  group_by(SiteName) %>%
-  summarise(
-    n = n(),
-    Chla_mean = mean(Chla, na.rm = TRUE),
-    Chla_SE = sd(Chla, na.rm = TRUE) / sqrt(n()),
-    Pheo_mean = mean(Pheo, na.rm = TRUE),
-    Pheo_SE = sd(Pheo, na.rm = TRUE) / sqrt(n()),
-    ChlPheo_mean = mean(ChlPheo, na.rm = TRUE),
-    ChlPheo_SE = sd(ChlPheo, na.rm = TRUE) / sqrt(n()))
-
+library(phyloseq)
 library(dplyr)
 library(tidyr)
-library(car)
+library(ggplot2)
+library(scales)
 
-anova_chla <- aov(Chla ~ SiteName, data = samples_chl)
-summary(anova_chla)
+ps2 <- subset_samples(ps, Reef_area != "OuterReef")
+ps2 <- prune_taxa(taxa_sums(ps2) > 1, ps2)
 
+## NO OCCUPANCY FILTER:
+ps.ao <- ps2
 
-anova_pheo <- aov(Pheo ~ SiteName, data = samples_chl)
-summary(anova_pheo)
+ps.rel <- transform_sample_counts(ps.ao, function(x) x / sum(x)) #  Convert to relative abundance
 
-kruskal_chlpheo <- kruskal.test(ChlPheo ~ SiteName, data = samples_chl)
-kruskal_chlpheo
+# Extract OTU table as samples x ASVs
+otu <- as(otu_table(ps.rel), "matrix")
 
-# Function to check assumptions
-check_anova_assumptions <- function(df, var) {
-  formula <- as.formula(paste(var, "~ SiteName"))
-  aov_res <- aov(formula, data = df)
-  
-  # 1. Normality of residuals (Shapiro-Wilk test)
-  shapiro_res <- shapiro.test(residuals(aov_res))
-  
-  # 2. Homogeneity of variance (Levene's Test)
-  levene_res <- leveneTest(formula, data = df)
-  
-  list(shapiro = shapiro_res, levene = levene_res)
+if (taxa_are_rows(ps.rel)) {
+  otu <- t(otu)
 }
 
-# Check for Chla
-check_anova_assumptions(samples_chl, "Chla") # ok both .0.05
+otu <- as.data.frame(otu)
+meta <- data.frame(sample_data(ps.rel))
+otu <- otu[rownames(meta), , drop = FALSE]
 
-# Check for Pheo
-check_anova_assumptions(samples_chl, "Pheo") # ok both .0.05
+# Check
+dim(otu) # 175 153254
+head(rownames(otu))   # should be sample names
+head(colnames(otu))   # should be ASV names
 
-# Check for ChlPheo
-check_anova_assumptions(samples_chl, "ChlPheo") # not normal - use Kruskal
+# Abundance–occupancy
+ao <- lapply(
+  c("Sediment", "Water"),
+  function(habitat) {
+    x <- otu[meta$Sample_type == habitat, , drop = FALSE]
+    data.frame(
+      Sample_type = habitat,
+      ASV = colnames(x),
+      Occupancy = colMeans(x > 0),
+      Mean_abundance = colMeans(x)) }) %>%
+  bind_rows()
 
-# Plot
-summary_long <- summary_table %>%
-  pivot_longer(
-    cols = c(Chla_mean, Pheo_mean, ChlPheo_mean, Chla_SE, Pheo_SE, ChlPheo_SE),
-    names_to = c("variable", ".value"),
-    names_pattern = "(Chla|Pheo|ChlPheo)_(.*)")
+# Check
+head(ao)
+summary(ao$Occupancy)
+summary(ao$Mean_abundance)
 
-summary_long$variable <- factor(
-  summary_long$variable,
-  levels = c("Chla", "Pheo", "ChlPheo"))
+ggplot(ao %>% filter(Mean_abundance > 0),
+  aes(x = Occupancy,  y = Mean_abundance)) +  geom_point(alpha = 0.35,  size = 1) +  facet_wrap(~Sample_type) +  scale_x_continuous(limits = c(0, 1), labels = scales::percent) +  scale_y_log10(labels = scales::percent) +
+  labs(x = "ASV occupancy",  y = "Mean relative abundance") +  theme_classic()
 
-SiteNames <- sort(unique(summary_long$SiteName))
+# occupancy-class table
+ao_class <- ao %>%
+  dplyr::mutate(Occupancy_class = case_when(Occupancy < 0.10 ~ "<10%",  Occupancy < 0.50 ~ "10–49%",  Occupancy < 1.00 ~ "50–99%",  TRUE ~ "100%"))
 
-site_order <- c("Alt1", "Alt2", "Alt3", "Alt4", "Int1", "Int2", "OTI01", "OTI03", "OTI05", "OTI06", "OTI07", "OTI08", "OTI10", "OTI12", "OTI15", "OTI16", "SA1", "SA2", "SA3")
+occupancy_table <- ao_class %>%
+  dplyr::count(Sample_type, Occupancy_class) %>%
+  complete(Sample_type,  Occupancy_class = c( "<10%", "10–49%", "50–99%", "100%"),fill = list(n = 0))
+occupancy_table
 
-facet_labels <- c(
-  Chla = "Chlorophyll a (mg/mL)",
-  Pheo = "Pheophytin a (mg/mL)",
-  ChlPheo = "Chlorophyll:Pheophytin ratio")
+summary(ao$Occupancy)
+summary(ao$Mean_abundance)
 
-ggplot(summary_long, aes(x = SiteName, y = mean)) +
-  geom_col(fill = "grey85", width = 0.8) +
-  geom_errorbar(aes(ymin = mean - SE, ymax = mean + SE),    width = 0.3, linewidth = 0.5) +
-  facet_wrap(~variable, scales = "free_y",labeller = labeller(variable = facet_labels),  nrow = 1) +
-  labs(x = "Site", y = "Mean ± SE") +  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
-  theme_bw(base_size = 11) +  theme(aspect.ratio = 1, legend.position = "none",  axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),axis.text.y = element_text(colour = "black", size = 11),
-    axis.title.x = element_text(colour = "black", size = 11),  axis.title.y = element_text(colour = "black", size = 11))
+table(ao$Sample_type)
+
+sum(is.na(ao$Occupancy))
+sum(is.na(ao$Mean_abundance))
+
+ao %>%
+  group_by(Sample_type) %>%
+  summarise(n_ASVs = n(), occupancy_min = min(Occupancy), occupancy_max = max(Occupancy),    abundance_min = min(Mean_abundance),    abundance_max = max(Mean_abundance)  )
+
+# how many ASVs are shared versus habitat-restricted
+ao_summary <- ao %>%
+  group_by(ASV) %>%  summarise(Sediment_occupancy = Occupancy[Sample_type == "Sediment"],    Water_occupancy = Occupancy[Sample_type == "Water"],    Sediment_abundance = Mean_abundance[Sample_type == "Sediment"],    Water_abundance = Mean_abundance[Sample_type == "Water"]) %>%  mutate(Habitat = case_when(Sediment_occupancy > 0 & Water_occupancy > 0 ~ "Shared",  Sediment_occupancy > 0 & Water_occupancy == 0 ~ "Sediment only",  Sediment_occupancy == 0 & Water_occupancy > 0 ~ "Water only",   TRUE ~ "Not detected"))
+
+table(ao_summary$Habitat)
+
+# occupancy within each habitat  
+ao_summary %>%
+  filter(Habitat != "Shared") %>%
+  group_by(Habitat) %>%  summarise(n_ASVs = n(), median_occupancy = median(ifelse(Habitat == "Sediment only", Sediment_occupancy,  Water_occupancy)),  mean_occupancy = mean(ifelse(Habitat == "Sediment only",Sediment_occupancy,Water_occupancy)),max_occupancy = max(ifelse(Habitat == "Sediment only",Sediment_occupancy, Water_occupancy)))  
+  
+ao_class <- ao_summary %>%
+  mutate(Habitat_occupancy = case_when(Habitat == "Sediment only" ~ Sediment_occupancy,  Habitat == "Water only" ~ Water_occupancy,  Habitat == "Shared" ~ pmax(Sediment_occupancy, Water_occupancy),  TRUE ~ NA_real_),  Occupancy_class = case_when(  Habitat_occupancy < 0.10 ~ "<10%",Habitat_occupancy < 0.50 ~ "10–49%",  Habitat_occupancy < 1.00 ~ "50–99%",  Habitat_occupancy == 1 ~ "100%"))
+
+table(ao_class$Habitat,  ao_class$Occupancy_class)
+
+# abundant but restricted ASVs
+ao_summary %>%
+  mutate( Habitat_occupancy = case_when(Habitat == "Sediment only" ~ Sediment_occupancy,  Habitat == "Water only" ~ Water_occupancy,  TRUE ~ NA_real_),
+    Habitat_abundance = case_when(Habitat == "Sediment only" ~ Sediment_abundance,  Habitat == "Water only" ~ Water_abundance,  TRUE ~ NA_real_)) %>%  filter(Habitat != "Shared") %>%  group_by(Habitat) %>% slice_max(Habitat_abundance, n = 20) %>%  select(ASV,   Habitat,  Habitat_occupancy, Habitat_abundance)
+
+# Calculate the most abundant ASVs by habitat
+ao_top <- ao_summary %>%
+  mutate(Habitat_occupancy = case_when(Habitat == "Sediment only" ~ Sediment_occupancy, Habitat == "Water only" ~ Water_occupancy,  TRUE ~ NA_real_ ),
+    Habitat_abundance = case_when(Habitat == "Sediment only" ~ Sediment_abundance,  Habitat == "Water only" ~ Water_abundance,  TRUE ~ NA_real_)) %>%
+  filter(Habitat != "Shared") %>%  group_by(Habitat) %>%  arrange(desc(Habitat_abundance), .by_group = TRUE) %>%  slice_head(n = 20) %>%  ungroup()
+
+ao_top # inspect the 20 most abundant exclusive ASVs in each habitat, including their occupancy.
+
+# quantify the "core" component
+core_ao <- ao_summary %>%
+  mutate(Habitat_occupancy = case_when(Habitat == "Sediment only" ~ Sediment_occupancy, Habitat == "Water only" ~ Water_occupancy,Habitat == "Shared" ~ pmax(Sediment_occupancy,Water_occupancy)),  Habitat_abundance = case_when(Habitat == "Sediment only" ~ Sediment_abundance,  Habitat == "Water only" ~ Water_abundance,  Habitat == "Shared" ~ pmax(Sediment_abundance,Water_abundance)))
+
+core_counts <- core_ao %>%
+  filter(Habitat %in% c("Sediment only", "Water only")) %>%  mutate(Core = ifelse(Habitat_occupancy >= 0.50, "Core", "Restricted")  ) %>% group_by(Habitat, Core) %>%  summarise(n_ASVs = n(), .groups = "drop")
+
+core_counts  # only a tiny fraction of exclusive ASVs are consistently detected, despite the enormous number of exclusive ASVs.
+core_counts <- core_counts %>%group_by(Habitat) %>%  mutate(percent = 100 * n_ASVs / sum(n_ASVs)) %>%  ungroup()
+core_counts
+
+ao_plot <- ao %>%  left_join(ao_summary %>%  select(ASV,Habitat),by = "ASV") %>%  mutate(High_occupancy_exclusive =  Habitat %in% c("Sediment only", "Water only") &  Occupancy >= 0.50)
+
+ggplot(ao_plot %>% filter(Mean_abundance > 0),aes(x = Occupancy,y = Mean_abundance)) +
+  geom_point(aes(alpha = High_occupancy_exclusive),size = 1) +  facet_wrap(~Sample_type) + scale_alpha_manual(values = c("TRUE" = 0.9,  "FALSE" = 0.20), guide = "none") +
+  scale_x_continuous(limits = c(0, 1), labels = scales::percent) +  scale_y_log10(labels = scales::percent) +  labs(x = "ASV occupancy", y = "Mean relative abundance") +
+  theme_bw() +  theme(legend.position = "right", aspect.ratio = 1.5,text = element_text(size = 11), axis.text.y = element_text(colour = "black", size = 11),  axis.title.y = element_text(colour = "black", size = 11), axis.text.x = element_text(colour = "black", size = 11),  axis.title.x = element_text(colour = "black", size = 11), legend.title = element_text(size = 11), legend.text = element_text(size = 11),panel.grid.minor = element_line(size = 0.5), panel.grid.major = element_line(size = 0.5))
+
+ggplot(ao_plot %>% filter(Mean_abundance > 0),  aes(x = Occupancy,  y = Mean_abundance)) +
+  geom_point(aes(colour = High_occupancy_exclusive), size = 1) +
+  facet_wrap(~Sample_type) +
+   scale_colour_manual(values = c("FALSE" = "grey65","TRUE" = "black"),labels = c("FALSE" = "Other ASVs","TRUE" = "High-occupancy exclusive ASVs"),  name = NULL) +
+  scale_x_continuous(limits = c(0, 1), labels = scales::percent) +
+  scale_y_log10(labels = scales::percent) +
+  labs(x = "ASV occupancy", y = "Mean relative abundance") +
+  theme_bw() +  theme(legend.position = "right",aspect.ratio = 1.5,  text = element_text(size = 11),axis.text.y = element_text(colour = "black", size = 11),  axis.title.y = element_text(colour = "black", size = 11),   axis.text.x = element_text(colour = "black", size = 11),axis.title.x = element_text(colour = "black", size = 11),  legend.title = element_text(size = 11),legend.text = element_text(size = 11),  panel.grid.minor = element_line(size = 0.5),panel.grid.major = element_line(size = 0.5))
+```
+
+## FAPROTAX: SEAWATER VS SEDIMENT
+```{r}
+library(phyloseq)
+library(microeco)
+library(file2meco)
+library(dplyr)
+library(pheatmap)
+
+ps2 <- subset_samples(ps, Sample_location == "Spot" | Sample_location == "Outer" | Sample_location == "Edge" | Sample_location == "Water") 
+ps2 <- subset_samples(ps2, Reef_area != "OuterReef")
+ps2 <- prune_taxa(taxa_sums(ps2) > 1, ps2)
+
+#  Prevalence filtering
+otu <- as(otu_table(ps2), "matrix")
+
+if (!taxa_are_rows(ps2)) {
+  otu <- t(otu)
+}
+
+prevalence <- rowSums(otu > 0)
+
+min_samples <- ceiling(0.20 * nsamples(ps2)) # 20% prevalence filtering
+
+keep_ASVs <- names(prevalence[prevalence >= min_samples])
+
+cat("Samples:", nsamples(ps2), "\n")
+cat("Original ASVs:", ntaxa(ps2), "\n")
+cat("Prevalence threshold:", min_samples, "samples\n")
+cat("ASVs retained:", length(keep_ASVs), "\n")
+
+ps_picrust <- prune_taxa(keep_ASVs, ps2)
+
+ps_picrust
+
+# Convert phyloseq to microeco
+meco_picrust <- phyloseq2meco(ps_picrust)
+
+# Check objects
+head(meco_picrust$otu_table)
+head(meco_picrust$tax_table)
+head(meco_picrust$sample_table)
+
+# FAPROTAX
+func <- trans_func$new(meco_picrust)
+
+func$cal_func(prok_database = "FAPROTAX")
+
+# Available FAPROTAX groups
+func$func_group_list
+
+names(func)
+str(func, max.level = 2)
+names(func$res_func)
+head(func$res_func) # ASV × FAPROTAX function matrix
+
+# Abundance-weighted FAPROTAX abundance
+func$cal_func_FR(abundance_weighted = TRUE,  perc = TRUE)
+
+func_abund <- func$res_func_FR # sample × function matrix that has already aggregated those ASV assignments
+
+head(func_abund)
+dim(func_abund) # 157  50
+
+# Ecologically relevant FAPROTAX functions
+
+target_functions <- c("photosynthetic_cyanobacteria", "aerobic_anoxygenic_phototrophy", "photoheterotrophy", "aerobic_chemoheterotrophy", "anaerobic_chemoheterotrophy","fermentation",  "nitrogen_fixation", "nitrate_reduction",
+      "sulfate_respiration","respiration_of_sulfur_compounds",  "hydrocarbon_degradation")
+
+# Only retain functions actually present in FAPROTAX result
+target_functions <- intersect(target_functions,  colnames(func_abund))
+target_functions
+
+setdiff(c("photosynthetic_cyanobacteria",  "aerobic_anoxygenic_phototrophy","photoheterotrophy","aerobic_chemoheterotrophy",  "anaerobic_chemoheterotrophy",  "fermentation",   "nitrogen_fixation",  "nitrate_reduction",  "sulfate_respiration",  "respiration_of_sulfur_compounds",  "hydrocarbon_degradation"),  target_functions)
+
+# Functional abundance + sample metadata
+functional_data <- func_abund[, target_functions,  drop = FALSE]
+
+metadata <- data.frame(sample_data(ps_picrust))
+
+# Check sample matching
+identical(rownames(functional_data),  rownames(metadata))
+
+functional_model <- cbind(metadata, functional_data)
+
+dim(functional_model)
+head(functional_model[, c("Sample_type", target_functions)])
+
+table(functional_model$Sample_type)
+
+function_labels <- c(photosynthetic_cyanobacteria =   "Photosynthetic cyanobacteria",  aerobic_anoxygenic_phototrophy =  "Aerobic anoxygenic phototrophy",  photoheterotrophy =  "Photoheterotrophy",aerobic_chemoheterotrophy =   "Aerobic chemoheterotrophy",  anaerobic_chemoheterotrophy =   "Anaerobic chemoheterotrophy",  fermentation =  "Fermentation",  nitrogen_fixation =  "Nitrogen fixation",
+  nitrate_reduction =    "Nitrate reduction", sulfate_respiration =   "Sulfate respiration",  respiration_of_sulfur_compounds =   "Sulfur-compound respiration",  hydrocarbon_degradation =   "Hydrocarbon degradation")
+
+# Only keep labels for functions actually present
+function_labels <- function_labels[names(function_labels) %in% target_functions]
+
+# Mean FAPROTAX abundance by Sample_type
+grouped_data <- functional_model %>%
+  group_by(Sample_type) %>%
+  summarise(across(all_of(target_functions),  ~ mean(.x, na.rm = TRUE)),.groups = "drop")
+
+grouped_data
+
+# Prepare grouped heatmap matrix
+heatmap_mean <- as.data.frame(grouped_data)
+rownames(heatmap_mean) <- heatmap_mean$Sample_type
+
+heatmap_mean$Sample_type <- NULL
+heatmap_mean <- t(as.matrix(heatmap_mean))
+
+colnames(heatmap_mean) <- c("Sediment",  "Water")
+
+rownames(heatmap_mean) <- function_labels[
+  rownames(heatmap_mean)
+]
+
+heatmap_mean <- as.matrix(grouped_data[, target_functions])
+rownames(heatmap_mean) <- grouped_data$Sample_type
+heatmap_mean <- t(heatmap_mean)
+rownames(heatmap_mean) <- function_labels[rownames(heatmap_mean)]
+heatmap_mean <- heatmap_mean[ ,  c("Sediment", "Water"), drop = FALSE]
+
+# Grouped mean heatmap
+
+pheatmap(heatmap_mean, cluster_rows = FALSE, cluster_cols = FALSE,  border_color = NA,  
+         #color = colorRampPalette(c("#FFF7EC", "#FDD49E", "#FC8D59", "#D7301F", "#7F0000"))(100),
+         color = colorRampPalette(c("#F7FBFF", "#DEEBF7", "#9ECAE1", "#4292C6", "#2171B5", "#084594"))(100),
+         #color = colorRampPalette(c("#D9EEF7", "#B7DCEB", "#8FC4D9", "#4292C6", "#2171B5", "#084594"))(100),
+         #color = colorRampPalette(c("#D6E6EF", "#B8D5E2", "#8FBCCD", "#4A91B5", "#216B8F", "#084594"))(100),
+         #color = colorRampPalette(c("#F7FCFD", "#CCECE6", "#7BC8C4", "#41AE76", "#238B45", "#005824"))(100),
+         #color = colorRampPalette(c("#F5FBFB", "#D5F0EE", "#9BD8D3", "#5AB4AC", "#238B8D", "#0868AC"))(100),
+         fontsize = 11,  fontsize_row = 11,  fontsize_col = 11,  angle_col = 0,  main = "Average predicted functional abundance (%)",  legend = TRUE,  legend_labels = NULL)
+
+# Individual-sample heatmap
+annotation <- functional_model %>%  select(Sample_type, SiteNumber)
+
+rownames(annotation) <- rownames(functional_model)
+
+annotation$Sample_type <- factor(annotation$Sample_type,levels = c("Sediment", "Water"))
+
+sample_order <- annotation %>%
+  mutate(Sample = rownames(annotation)) %>%
+  arrange(Sample_type, SiteNumber) %>%
+  pull(Sample)
+
+heatmap_data <- functional_model[sample_order,  target_functions,  drop = FALSE]
+
+# Z-score each functional group
+heatmap_z <- scale(heatmap_data)
+
+heatmap_z <- as.data.frame(heatmap_z)
+
+rownames(heatmap_z) <- rownames(heatmap_data)
+
+colnames(heatmap_z) <- function_labels[ colnames(heatmap_z)]
+
+annotation <- annotation[
+  sample_order,  ,  drop = FALSE]
+
+identical(rownames(heatmap_z),  rownames(annotation))
+
+# Individual-sample Z-score heatmap
+annotation_colors <- list(Sample_type = c("Sediment" = "orange","Water" = "cornflowerblue"))
+
+pheatmap(t(heatmap_z),annotation_col = annotation,  annotation_colors = annotation_colors,  cluster_rows = FALSE,  cluster_cols = FALSE,  scale = "none",  border_color = NA,  fontsize = 9,  fontsize_col = 6,  angle_col = 90)
+```
+
+### statistical comparisons
+```{r}
+function_summary <- lapply(target_functions, function(fun) {
+  
+  dat <- functional_model %>%
+    select(Sample_type, all_of(fun)) %>%
+    filter(!is.na(.data[[fun]]))
+  
+  sediment <- dat %>%
+    filter(Sample_type == "Sediment") %>%
+    pull(all_of(fun))
+  
+  water <- dat %>%
+    filter(Sample_type == "Water") %>%
+    pull(all_of(fun))
+  
+  test <- wilcox.test(
+    sediment,
+    water,
+    exact = FALSE
+  )
+  
+  data.frame(
+    Function = fun,
+    Sediment_median = median(sediment, na.rm = TRUE),
+    Sediment_IQR = IQR(sediment, na.rm = TRUE),
+    Water_median = median(water, na.rm = TRUE),
+    Water_IQR = IQR(water, na.rm = TRUE),
+    P = test$p.value
+  )
+  
+}) %>%
+  bind_rows()
+
+# Benjamini-Hochberg correction 
+function_summary$P_adj <- p.adjust( function_summary$P,  method = "BH")
+
+# Add function labels
+function_summary$Function_label <-  function_labels[function_summary$Function]
+
+# Round p-values to 5 decimal places
+function_summary <- function_summary %>%  mutate(P = round(P, 5),   P_adj = round(P_adj, 5))
+
+# Final table
+function_summary %>%
+  select(Function,  Function_label,   Sediment_median,Sediment_IQR,   Water_median,   Water_IQR,  P,  P_adj)
+
+function_summary <- function_summary %>%
+  mutate(P = round(P, 5),  P_adj = round(P_adj, 5))
+
+function_summary
 ```
 
 
+#### Overall multivariate test
+Does the overall predicted functional profile differ between sediment and water?
+```{r}
+library(vegan)
+
+functional_matrix <- functional_model[, target_functions]
+rownames(functional_matrix) <- rownames(functional_model)
+
+# Identify samples with at least one predicted function
+keep <- rowSums(functional_matrix, na.rm = TRUE) > 0
+
+functional_matrix_clean <- functional_matrix[keep, ]
+
+functional_model_clean <- functional_model[keep, ]
+
+# Check
+table(functional_model_clean$Sample_type)
+
+identical(rownames(functional_matrix_clean),  rownames(functional_model_clean)) # TRUE
+
+functional_dist <- vegdist(functional_matrix_clean,  method = "bray")
+
+adonis_function <- adonis2(functional_dist ~ Sample_type,  data = functional_model_clean,  permutations = 999)
+
+bd_function <- betadisper(functional_dist,  functional_model_clean$Sample_type)
+
+permutest(bd_function, permutations = 999)
+```
