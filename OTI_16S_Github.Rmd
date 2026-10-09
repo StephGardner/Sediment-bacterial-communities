@@ -2164,7 +2164,7 @@ Water <- psmelt(Water) %>%
 
 ## DESeq2
 ```{r}
-ps.fam <- tax_glom(ps, taxrank = "Phylum")
+ps.fam <- tax_glom(ps, taxrank = "Family")
 
 # DESeq2 setup
 gm_mean <- function(x, na.rm=TRUE){ exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x)) }
